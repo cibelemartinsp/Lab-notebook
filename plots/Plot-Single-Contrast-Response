@@ -1,0 +1,448 @@
+
+#%%
+
+###################################################################
+############# SINGLE CONTRAST RESPONSE EXAMPLE FIGURE #############
+###################################################################
+
+
+
+
+
+# %%
+import os, sys 
+import numpy as np
+import matplotlib.pylab as plt
+
+# Add physion library path
+sys.path += [os.path.join(os.path.expanduser('~'), 'lab-notebook', 'cibele', 'physion', 'src')]
+
+from physion.analysis.read_NWB import scan_folder_for_NWBfiles, Data
+from physion.analysis.episodes.build import EpisodeData
+from physion.utils import plot_tools as pt
+from physion.dataviz.episodes.trial_average import plot as plot_trial_average
+
+# 1) SCAN FOR NWB FILES USING YOUR EXACT CONFIGURATION
+DATASET = scan_folder_for_NWBfiles(
+    os.path.join(
+        os.path.expanduser('~'),
+        'CURATED', 'Cibele', 'PV-cells_WT_Young_V1' , 'NWBs', 'P20-23'
+    ),
+    for_protocol='ff-gratings-2orientations-8contrasts-15repeats',
+)
+
+def get_dFoF_params(dataset):
+    if dataset[:4] == 'PYR-':
+        dFoF_parameters = dict(
+            roi_to_neuropil_fluo_inclusion_factor=0.,
+            neuropil_correction_factor = 0.7,
+            method_for_F0 = 'sliding_percentile',
+            percentile=5.,
+            sliding_window = 5*60,
+        )
+    else:
+        dFoF_parameters = dict(
+            roi_to_neuropil_fluo_inclusion_factor=1.15,
+            neuropil_correction_factor = 0.7,
+            method_for_F0 = 'sliding_percentile',
+            percentile=5.,
+            sliding_window = 5*60,
+        )
+    return dFoF_parameters
+
+dFoF_params = get_dFoF_params('SST')
+
+# 2) ORIGINAL FIGURES FUNCTIONS MODIFIED FOR OPTIMIZED VISUALIZATION
+def cell_sensitivity_example_fig(filename,
+                                 angle=0,
+                                 stat_test_props = dict(interval_pre=[-1,0], 
+                                                       interval_post=[1,2],
+                                                       test='ttest',
+                                                       sign='negative'), # CHANGED TO TARGET NEGATIVE DROPS
+                                 response_significance_threshold = 0.01,
+                                 Nsamples = 10, 
+                                 color='#ff9ab5ff', # CUSTOM COLOR FOR RESPONSES
+                                 seed=10):
+    
+    np.random.seed(seed)
+    
+    data = Data(filename, with_visual_stim=True)
+    # Note: visual_stim is now built automatically with with_visual_stim=True
+    # No need to call data.init_visual_stim() or EPISODES.init_visual_stim()
+
+    EPISODES = EpisodeData(data,
+                           quantities=['dFoF'],
+                           protocol_id=np.flatnonzero(['8contrasts' in p for p in data.protocols]),
+                           verbose=False) # Turned down verbosity for smoother terminal printouts 
+    
+    fig, AX = pt.plt.subplots(Nsamples, len(EPISODES.varied_parameters['contrast']), figsize=(9, 8))
+    plt.subplots_adjust(right=0.75, left=0.1, top=0.95, bottom=0.08, wspace=0.1, hspace=0.8)
+    
+    for Ax in AX:
+        for ax in Ax:
+            ax.axis('off')
+
+    for i, r in enumerate(np.random.choice(np.arange(data.nROIs), 
+                                           min([Nsamples, data.nROIs]), replace=False)):
+
+        # SHOW trial-average
+        plot_trial_average(EPISODES,
+                           condition=(EPISODES.angle==angle),
+                           column_key='contrast',
+                           color=color,
+                           quantity='dFoF',
+                           Ybar=1., Ybar_label='1dF/F',
+                           Xbar=1., Xbar_label='1s',
+                           roiIndex=r,
+                           with_stat_test=True,
+                           stat_test_props=stat_test_props,
+                           with_screen_inset=False,
+                           AX=[AX[i]], no_set=False)
+        AX[i][0].annotate('roi #%i  ' % (r+1), (0,0), ha='right', xycoords='axes fraction')
+
+        # SHOW summary angle dependence
+        inset = pt.inset(AX[i][-1], (2.2, 0.2, 1.2, 0.8))
+
+        contrasts, y, sy = [], [], []
+
+        for c, contrast in enumerate(EPISODES.varied_parameters['contrast']):
+
+            stats = EPISODES.stat_test_for_evoked_responses(
+                episode_cond=EPISODES.find_episode_cond(key=['angle', 'contrast'], value=[angle, contrast]),
+                response_args=dict(quantity='dFoF', roiIndex=r),
+                **stat_test_props
+            )
+
+            contrasts.append(contrast)
+            y.append(np.mean(stats.y - stats.x))    # means "post-pre"
+            sy.append(np.std(stats.y - stats.x))     # std "post-pre"
+
+        pt.scatter(contrasts, np.array(y), sy=np.array(sy), ax=inset, ms=1, lw=1, color=color)
+        inset.plot(contrasts, 0*np.array(contrasts), 'k:', lw=0.5)
+        inset.set_ylabel('$\\delta$ $\\Delta$F/F     ', fontsize=7)
+        inset.set_xticks([0,1])
+        
+    inset.set_xlabel('contrast', fontsize=7)
+    return fig
+
+# ------------------------------------------------------------
+# 3) INTERACTIVE CONTROLLER MENU FOR CHOSEN REPS
+# ------------------------------------------------------------
+n_files = len(DATASET['files'])
+
+if n_files == 0:
+    print("[WARNING] Zero files found matching target configuration pipeline parameters.")
+else:
+    while True:
+        # Guarantee memory cleanup before starting the drawing cycle
+        plt.close('all')
+        
+        print("\n" + "="*70)
+        print(f"🏆 NWB SESSIONS LEADERBOARD (FOUND {n_files} CONTRAST FILES):")
+        print("="*70)
+        
+        # Display the first 10 files in the directory list
+        for idx, fpath in enumerate(DATASET['files'][:10]):
+            fname = os.path.basename(fpath)
+            print(f"  [{idx + 1}] {fname}")
+            
+        if n_files > 10:
+            print(f"  ... and {n_files - 10} more files available in directory structure.")
+            
+        print("  [Q] Exit script runtime environment")
+        print("="*70)
+        
+        user_input = input(f"\n👉 Choose session index (1-{min(10, n_files)}) or 'Q' to quit: ").strip()
+        
+        if user_input.lower() == 'q':
+            print("Exiting controller pipeline environment.")
+            break
+            
+        try:
+            session_idx = int(user_input) - 1
+            if session_idx < 0 or session_idx >= n_files:
+                print(f"[Error] Index range error! Input an integer between 1 and {min(10, n_files)}.")
+                continue
+        except ValueError:
+            print("[Error] Invalid character input type entered.")
+            continue
+            
+        selected_file_path = DATASET['files'][session_idx]
+        selected_file_name = os.path.basename(selected_file_path)
+        
+        print(f"\n🔄 PARSING AND COMPUTING CONTRAST MATRIX FOR: {selected_file_name}")
+        
+        # Plot and generate the selected session window matrix
+        fig = cell_sensitivity_example_fig(selected_file_path)
+        plt.show(block=False)
+        plt.pause(0.5)
+        
+        print("\nOptions:")
+        print("  - Press [ENTER] to save this trial-average matrix figure directly to your Desktop.")
+        print("  - Type 'B' to immediately go back to the menu selection list.")
+        
+        action_choice = input("👉 Choose action option: ").strip()
+        
+        if action_choice.lower() == 'b':
+            print("Closing figure canvas and returning to main file list...")
+            continue
+            
+        elif not action_choice:
+            # Automatic Desktop Saving Setup
+            output_filename = f"TRIAL_AVG_NEGATIVE_RESP_SESS_{session_idx + 1}.svg"
+            output_dir = os.path.join(os.path.expanduser('~'), 'Desktop', 'Final-Figures-PhD')
+            os.makedirs(output_dir, exist_ok=True)
+            output_svg = os.path.join(output_dir, output_filename)
+            
+            fig.savefig(output_svg, format='svg', dpi=300, bbox_inches='tight', facecolor='white')
+            print(f"\n✔️ Matrix safely saved in vector format: {output_svg}")
+            plt.close('all')
+
+
+
+
+
+
+
+# %%
+
+#######################################################
+######### PLOT MEAN ACTIVITY ACROSS THE NWB ############
+#######################################################
+
+import os, sys 
+import numpy as np
+import matplotlib.pylab as plt
+
+# Add physion library path
+sys.path += [os.path.join(os.path.expanduser('~'), 'lab-notebook', 'cibele', 'physion', 'src')]
+
+from physion.analysis.read_NWB import scan_folder_for_NWBfiles, Data
+from physion.analysis.episodes.build import EpisodeData
+from physion.utils import plot_tools as pt
+from physion.dataviz.episodes.trial_average import plot as plot_trial_average
+
+# ==============================================================================
+# 1) SCAN FOR NWB FILES USING YOUR EXACT CONFIGURATION
+# ==============================================================================
+DATASET = scan_folder_for_NWBfiles(
+    os.path.join(
+        os.path.expanduser('~'),
+        'CURATED', 'Cibele', 'SST-cells_cond-GluN1-KO_Adult_V1' , 'NWBs'
+    ),
+    for_protocol='ff-gratings-2orientations-8contrasts-15repeats',
+)
+
+def get_dFoF_params(dataset):
+    if dataset[:4] == 'PYR-':
+        dFoF_parameters = dict(
+            roi_to_neuropil_fluo_inclusion_factor=0.,
+            neuropil_correction_factor = 0.7,
+            method_for_F0 = 'sliding_percentile',
+            percentile=5.,
+            sliding_window = 5*60,
+        )
+    else:
+        dFoF_parameters = dict(
+            roi_to_neuropil_fluo_inclusion_factor=1.15,
+            neuropil_correction_factor = 0.7,
+            method_for_F0 = 'sliding_percentile',
+            percentile=5.,
+            sliding_window = 5*60,
+        )
+    return dFoF_parameters
+
+dFoF_params = get_dFoF_params('SST')
+
+# ==============================================================================
+# 2) COMPUTE AND PLOT SINGLE REPRESENTATIVE GRAND MEAN
+# ==============================================================================
+def plot_grand_dataset_average(dataset, angle=0, 
+                               stat_test_props=dict(interval_pre=[-1,0], 
+                                                    interval_post=[1,2],
+                                                    test='ttest',
+                                                    sign='negative'),
+                               color='#5d1490ff'):
+    
+    file_list = dataset['files']
+    n_files = len(file_list)
+    
+    if n_files == 0:
+        print("[Error] No NWB files found in the dataset path.")
+        return
+
+    print(f"🚀 Found {n_files} NWB files. Aggregating session matrices...")
+
+    # Open the first file just to get the list of contrasts dynamically
+    first_data = Data(file_list[0], with_visual_stim=True)
+    # Note: visual_stim is now built automatically with with_visual_stim=True
+    first_episodes = EpisodeData(first_data, quantities=['dFoF'],
+                                  protocol_id=0, verbose=False)
+    contrasts = first_episodes.varied_parameters['contrast']
+    n_contrasts = len(contrasts)
+    plt.close('all') 
+
+    pooled_responses = {c: [] for c in contrasts}
+    collected_traces = {c: [] for c in contrasts}
+    time_vector = None
+    total_rois_processed = 0
+
+    hidden_fig, hidden_ax = plt.subplots(1, n_contrasts)
+    
+    for idx, fpath in enumerate(file_list):
+        fname = os.path.basename(fpath)
+        print(f"  [{idx+1}/{n_files}] Extracting data from: {fname}")
+        
+        try:
+            data = Data(fpath, with_visual_stim=True)
+            # Note: visual_stim is now built automatically with with_visual_stim=True
+            EPISODES = EpisodeData(data, quantities=['dFoF'],
+                                   protocol_id=0, verbose=False)
+            
+            all_rois = list(range(data.nROIs))
+            total_rois_processed += data.nROIs
+            
+            for ax in hidden_ax:
+                ax.clear()
+                
+            plot_trial_average(EPISODES,
+                               condition=(EPISODES.angle==angle),
+                               column_key='contrast',
+                               color=color,
+                               quantity='dFoF',
+                               roiIndex=all_rois, 
+                               with_stat_test=False,
+                               with_screen_inset=False,
+                               AX=[hidden_ax], no_set=False)
+            
+            for i, contrast in enumerate(contrasts):
+                lines = hidden_ax[i].get_lines()
+                
+                trace_found = False
+                for line in reversed(lines):
+                    x_data = line.get_xdata()
+                    y_data = line.get_ydata()
+                    
+                    if len(x_data) > 100: 
+                        if time_vector is None:
+                            time_vector = x_data
+                        collected_traces[contrast].append(y_data)
+                        trace_found = True
+                        break
+                
+                if not trace_found:
+                    print(f"  [Warning] Neural trace line not caught for contrast {contrast} in {fname}")
+            
+            for contrast in contrasts:
+                contrast_conditions = EPISODES.find_episode_cond(key=['angle', 'contrast'], value=[angle, contrast])
+                for r in all_rois:
+                    stats = EPISODES.stat_test_for_evoked_responses(
+                        episode_cond=contrast_conditions,
+                        response_args=dict(quantity='dFoF', roiIndex=r),
+                        **stat_test_props
+                    )
+                    pooled_responses[contrast].append(np.mean(stats.y - stats.x))
+
+        except Exception as e:
+            print(f"  [Warning] Skipping {fname} due to parsing error: {e}")
+            continue
+
+    plt.close(hidden_fig) 
+    
+    if time_vector is None:
+        print("[Error] Could not find a valid timeline vector across files. Terminating.")
+        return None
+
+    print(f"\n📊 Extracted {total_rois_processed} ROIs successfully. Generating aligned summary plot...")
+
+    # FIX: Added sharey=True to force every single subplot to use identical Y-axis boundaries
+    fig, AX = pt.plt.subplots(1, n_contrasts, figsize=(14, 3.8), sharey=True)
+    plt.subplots_adjust(right=0.78, left=0.1, top=0.82, bottom=0.25, wspace=0.15)
+    
+    global_y_min, global_y_max = 0.0, 0.2
+
+    # Find the true global minimum and maximum across ALL data to prevent clipping
+    for contrast in contrasts:
+        session_traces = np.array(collected_traces[contrast])
+        if len(session_traces) > 0:
+            grand_mean = np.mean(session_traces, axis=0)
+            grand_sem = np.std(session_traces, axis=0) / np.sqrt(len(session_traces))
+            global_y_min = min(global_y_min, np.min(grand_mean - grand_sem))
+            global_y_max = max(global_y_max, np.max(grand_mean + grand_sem))
+
+    # 3) DRAW ONE SINGLE MEAN REPRESENTATIVE TRACE PER CONTRAST COLUMN
+    for i, contrast in enumerate(contrasts):
+        ax = AX[i]
+        ax.axis('off')
+        
+        session_traces = np.array(collected_traces[contrast]) 
+        
+        if len(session_traces) > 0:
+            grand_mean = np.mean(session_traces, axis=0)
+            grand_sem = np.std(session_traces, axis=0) / np.sqrt(len(session_traces))
+            
+            # Draw gray stimulus background box
+            ax.axvspan(0, 2, color='gainsboro', alpha=0.6, zorder=0)
+            
+            # Plot the single trace line and shadow shroud
+            ax.fill_between(time_vector, grand_mean - grand_sem, grand_mean + grand_sem, 
+                            color=color, alpha=0.3, zorder=2)
+            ax.plot(time_vector, grand_mean, color=color, lw=2, zorder=3)
+            
+            ax.axvline(0, color='darkgray', linestyle=':', lw=0.8)
+            ax.set_title(f"Contrast\n{contrast:.2f}" if isinstance(contrast, float) else f"Contrast\n{contrast}", fontsize=9)
+            
+            # Explicitly force the uniform axis limit on this panel
+            ax.set_ylim(global_y_min - 0.05, global_y_max + 0.05)
+
+    # Position clean scalebars based on the unified y-limits
+    scale_bottom = global_y_min - 0.02
+    AX[0].plot([time_vector[0], time_vector[0]], [scale_bottom, scale_bottom + 0.2], 'k-', lw=1.5)
+    AX[0].text(time_vector[0] + 0.1, scale_bottom + 0.1, '0.2 dF/F', va='center', fontsize=8)
+    AX[0].plot([time_vector[0], time_vector[0] + 1.0], [scale_bottom, scale_bottom], 'k-', lw=1.5)
+    AX[0].text(time_vector[0] + 0.5, scale_bottom - 0.04, '1s', ha='center', va='top', fontsize=8)
+    
+    AX[0].annotate('Grand Dataset Mean\n(Single Rep Trace) ', (0, 0.4), ha='right', xycoords='axes fraction', fontweight='bold', fontsize=8)
+
+    # 4) PLOT SUMMARY INSET CONTRAST SENSITIVITY CURVE
+    summary_axes = AX[-1]
+    inset = pt.inset(summary_axes, (2.4, 0.2, 1.4, 0.8))
+    
+    mean_responses = []
+    sem_responses = []
+
+    for contrast in contrasts:
+        data_points = np.array(pooled_responses[contrast])
+        mean_responses.append(np.mean(data_points))
+        sem_responses.append(np.std(data_points) / np.sqrt(len(data_points)) if len(data_points) > 0 else 0)
+
+    pt.scatter(contrasts, np.array(mean_responses), sy=np.array(sem_responses), ax=inset, ms=4, lw=1.5, color=color)
+    inset.plot(contrasts, 0*np.array(contrasts), 'k--', lw=0.5)
+    inset.set_ylabel('Mean $\\delta$ $\\Delta$F/F', fontsize=8)
+    inset.set_xticks(contrasts)
+    inset.set_xticklabels([f"{c:.2f}" if isinstance(c, float) else str(c) for c in contrasts], rotation=45, fontsize=7)
+    inset.set_xlabel('Contrast', fontsize=8)
+    
+    fig.suptitle(f"Dataset Grand Average — {n_files} Files Combined (Total n={total_rois_processed} ROIs)", 
+                 fontsize=11, y=0.98, fontweight='bold')
+    
+    return fig
+
+# ==============================================================================
+# 3) RUNNING ENVIRONMENT EXECUTION
+# ==============================================================================
+if __name__ == '__main__':
+    fig = plot_grand_dataset_average(DATASET)
+    
+    if fig is not None:
+        plt.show(block=False)
+        
+        output_filename = "CLEAN_GRAND_REPRESENTATIVE_AVERAGE.svg"
+        output_dir = os.path.join(os.path.expanduser('~'), 'Desktop', 'Final-Figures-PhD')
+        os.makedirs(output_dir, exist_ok=True)
+        output_svg = os.path.join(output_dir, output_filename)
+        
+        fig.savefig(output_svg, format='svg', dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"\n✔️ Clean grand average figure successfully saved: {output_svg}")
+        plt.show()
+# %%
