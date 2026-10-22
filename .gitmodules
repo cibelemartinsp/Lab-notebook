@@ -1,0 +1,6 @@
+[submodule "physion"]
+	path = physion
+	url = https://github.com/yzerlaut/physion
+[submodule "utils/plot_tools"]
+	path = utils/plot_tools
+	url = https://github.com/yzerlaut/plot_tools
