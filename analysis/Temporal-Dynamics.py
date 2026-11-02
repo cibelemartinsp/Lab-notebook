@@ -9,7 +9,7 @@ import multiprocessing
 import numpy as np
 
 sys.path += [os.path.join(os.path.expanduser('~'),\
-                'lab-notebook', 'cibele', 'physion', 'src')]
+                'code', 'cibele', 'physion', 'src')]
 
 from physion.analysis.read_NWB\
                 import scan_folder_for_NWBfiles, Data
@@ -59,7 +59,7 @@ def process_file(filename, i, c):
         try:
 
             # deconvolve first:
-            data.build_Deconvolved(Tau=TAU_DECONVOLUTION)
+            data.build_Deconvolved(Tau=TAU_DECONVOLUTION, quantity='dFoF')
             # process episodes
             Episodes = EpisodeData(data, 
                                     quantities=quantities,

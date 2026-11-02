@@ -1,7 +1,7 @@
 # %%
 import sys, os
 sys.path += [os.path.join(os.path.expanduser('~'),\
-                          'lab-notebook', 'cibele', 'physion', 'src')]
+                          'code', 'cibele', 'physion', 'src')]
 
 import physion.utils.plot_tools as pt
 from physion.analysis.protocols.orientation_tuning\
@@ -100,7 +100,7 @@ fig, ax = plot_orientation_tuning_curve(
     datasets,
     average_by='sessions', #default is 'subjects'
     #colors=['#c6e7bbff', '#99b993ff','#428e58ff', '#12522eff'],
-    colors=['darkgray', '#005d8aff' ],
+    colors=['lightgray', '#005d8aff' ],
     path=summary_folder
 )
 
@@ -185,17 +185,19 @@ def load_session_SI(summary_folder, dataset):
 ##SELECTIVITY INDEX
 # Define datasets for the plot (active, non-commented entries)
 datasets = [
-    'SST-cells_cond-GluN1-KO_P15-P19_V1_contrast-1.0',
-    'SST-cells_cond-GluN1-KO_P20-P23_V1_contrast-1.0',
-    'SST-cells_cond-GluN1-KO_P24-P27_V1_contrast-1.0',
-    'SST-cells_cond-GluN1-KO_Adult_V1_contrast-1.0',
+    #'SST-cells_cond-GluN1-KO_P15-P19_V1_contrast-1.0',
+    #'SST-cells_cond-GluN1-KO_P20-P23_V1_contrast-1.0',
+    #'SST-cells_cond-GluN1-KO_P24-P27_V1_contrast-1.0',
+    #'SST-cells_cond-GluN1-KO_Adult_V1_contrast-1.0',
+    'PYR-SynGCaMP_WT_Adult_V1_contrast-0.5',
+    'PYR-SynGCaMP_WT_Adult_V1_contrast-1.0'
 ]
 
 fig, ax = plot_selectivity(
     datasets,
-    #average_by='ROIs',
+    average_by='ROIs',
     #average_by='subjects',
-    colors=['#dbc0f2', '#b38fd6', '#9740d2', '#5d1490'],  # Solid colors, no transparency
+    colors=['lightgray', '#005d8aff','#dbc0f2', '#b38fd6', '#9740d2', '#5d1490'],  # Solid colors, no transparency
     path=summary_folder,
     fig_args=dict(ax_scale=(0.8,1))
 )

@@ -4,7 +4,7 @@ import numpy as np
 from scipy import stats
 
 sys.path += [os.path.join(os.path.expanduser('~'),\
-                          'lab-notebook', 'cibele', 'physion', 'src')]
+                          'code', 'cibele', 'physion', 'src')]
 
 import physion.utils.plot_tools as pt
 pt.set_style('dark')
@@ -88,17 +88,17 @@ def extract_gains_from_dataset(folder, dataset_name):
 pt.set_style()
 
 DATASETS = [#'Deconvolved_PYR-PV-SynGCaMP_WT_P15-P19_V1_angle-0.0',
-            'Deconvolved_SST-cells_cond-GluN1-KO_P15-P19_V1_angle-0.0',
-            'Deconvolved_SST-cells_cond-GluN1-KO_P20-P23_V1_angle-0.0',
-            'Deconvolved_SST-cells_cond-GluN1-KO_P24-P27_V1_angle-0.0',
-            'Deconvolved_SST-cells_cond-GluN1-KO_Adult_V1_angle-0.0',
+            #'Deconvolved_SST-cells_cond-GluN1-KO_P15-P19_V1_angle-0.0',
+            #'Deconvolved_SST-cells_cond-GluN1-KO_P20-P23_V1_angle-0.0',
+            #'Deconvolved_SST-cells_cond-GluN1-KO_P24-P27_V1_angle-0.0',
+            #'Deconvolved_SST-cells_cond-GluN1-KO_Adult_V1_angle-0.0',
             #'Deconvolved_SST-cells_WT_P15-P19_V1_angle-0.0',
             #'Deconvolved_SST-cells_WT_P20-P23_V1_angle-0.0',
             #'Deconvolved_SST-cells_WT_P24-P27_V1_angle-0.0',   
             #'Deconvolved_PV-cells_WT_Adult_V1_angle-0.0',
             #'Deconvolved_PYR-SynGCaMP_WT_Adult_V1_angle-0.0',
             #'Deconvolved_SST-cells_cond-GluN1-KO_Adult_V1_angle-0.0', 
-            #'PYR-PV-SynGCaMP_WT_P24-P27_V1_angle-0.0',
+            'Deconvolved_PYR-SynGCaMP_WT_Adult_V1_angle-0.0',
             ]
 
 # ====================================================
@@ -106,8 +106,8 @@ DATASETS = [#'Deconvolved_PYR-PV-SynGCaMP_WT_P15-P19_V1_angle-0.0',
 # ====================================================
 
 fig, ax = plot_contrast_sensitivity(DATASETS,\
-                        average_by='sessions',
-                        #average_by='ROIs',
+                        #average_by='sessions',
+                        average_by='ROIs',
                         #average_by='subjects',
                         colors = ['#dbc0f2ff', '#b38fd6ff', '#9740d2ff', '#5d1490ff', '#c6e7bbff', '#99b993ff', '#428e58ff', ],
                         path=summary_folder,
@@ -741,4 +741,388 @@ if len(figs) == 0:
 # Display all figures (needed when running as a plain .py file;
 # in the VS Code Interactive Window / notebook cells they also appear inline)
 plt.show()
+
+
+
+
+
+
+# %%
+
+#######################################################################################
+### NAKA-RUSHTON FIT OF CONTRAST RESPONSE CURVES ###
+#######################################################################################
+#
+#   R(c) = R0 + Rmax * c^n / (c^n + C50^n)
+#
+#   R0   : baseline / offset
+#   Rmax : response range (maximum above baseline)  -> "response gain"
+#   C50  : semi-saturation contrast                 -> "contrast gain"
+#   n    : slope / exponent
+#
+#   derived from the fitted curve:
+#   AUC          : area under (R - R0) over log10(contrast), tested range
+#   threshold    : contrast where R crosses R0 + THRESHOLD_FRACTION*Rmax
+#   dynamic range: log10(C90/C10) (contrast span between 10% and 90% of Rmax, in log units)
+#
+#   Runs directly on the Sensitivities_*.npy summaries (no need to re-open the NWBs).
+#   NB: the summaries store post-pre responses (so baseline is already ~0) and do
+#   not keep the pre-stimulus trial-by-trial values, so the "R0 + 2*sigma_baseline"
+#   threshold is replaced by a fraction of Rmax.
+#######################################################################################
+
+import os, itertools
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from scipy.stats import mannwhitneyu, kruskal, sem
+
+# ---------------- SETTINGS ----------------
+NR_DATASETS = [
+    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_P15-P19_V1_angle-0.0", "color": "#dbc0f2ff"},
+    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_P20-P23_V1_angle-0.0", "color": "#b38fd6ff"},
+    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_P24-P27_V1_angle-0.0", "color": "#9740d2ff"},
+    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_Adult_V1_angle-0.0",   "color": "#5d1490ff"},
+]
+NR_AVERAGE_BY = 'sessions'     # 'sessions', 'subjects' or 'ROIs'  (one fit per unit)
+NR_ONLY_RESPONSIVE = False     # True -> keep only ROIs significant (positive) at >=1 contrast
+THRESHOLD_FRACTION = 0.10      # threshold = R0 + 10% of Rmax
+MIN_R2 = 0.5                   # fits below this R2 are excluded from the stats
+C50_BOUNDS = (0.01, 2.0)       # fits with C50 or n stuck at a bound are excluded too
+N_BOUNDS = (0.5, 8.0)
+NR_XSCALE = 'linear'          # 'linear' or 'log' contrast axis (see set_contrast_axis below)
+NR_SAVE = False
+NR_OUTPUT_DIR = os.path.expanduser('~/Desktop/Final-Figures-PhD')
+
+try:
+    summary_folder
+except NameError:
+    summary_folder = os.path.expanduser('~/CURATED/Cibele/summary')
+
+
+# ---------------- MODEL ----------------
+def naka_rushton(c, R0, Rmax, C50, n):
+    return R0 + Rmax * c**n / (c**n + C50**n)
+
+def contrast_at_fraction(f, C50, n):
+    """contrast where R = R0 + f*Rmax (analytical inverse of NR)"""
+    return C50 * (f / (1. - f))**(1. / n)
+
+def fit_naka_rushton(contrast, response):
+    contrast, response = np.asarray(contrast, float), np.asarray(response, float)
+    span = max(np.ptp(response), 1e-6)
+    p0 = [response.min(), span, np.median(contrast), 2.]
+    bounds = ([response.min() - span, 0.,          C50_BOUNDS[0], N_BOUNDS[0]],
+              [response.max(),        10. * span,  C50_BOUNDS[1], N_BOUNDS[1]])
+    try:
+        popt, _ = curve_fit(naka_rushton, contrast, response,
+                            p0=p0, bounds=bounds, maxfev=20000)
+    except RuntimeError:
+        return None
+    R0, Rmax, C50, n = popt
+    resid = response - naka_rushton(contrast, *popt)
+    ss_tot = np.sum((response - response.mean())**2)
+    R2 = 1. - np.sum(resid**2) / ss_tot if ss_tot > 0 else np.nan
+
+    # derived metrics
+    logc = np.linspace(np.log10(contrast.min()), np.log10(contrast.max()), 200)
+    AUC = np.trapezoid(naka_rushton(10**logc, *popt) - R0, logc)
+    C10, C90 = contrast_at_fraction(0.1, C50, n), contrast_at_fraction(0.9, C50, n)
+
+    return dict(R0=R0, Rmax=Rmax, C50=C50, n=n, R2=R2, AUC=AUC,
+                threshold=contrast_at_fraction(THRESHOLD_FRACTION, C50, n),
+                C10=C10, C90=C90, dynamic_range=np.log10(C90 / C10),
+                C50_in_range=contrast.min() <= C50 <= contrast.max(),
+                # parameter pegged at a bound = curve not constrained by the data
+                at_bound=bool(np.isclose(C50, C50_BOUNDS, rtol=1e-3).any() or
+                              np.isclose(n, N_BOUNDS, rtol=1e-3).any()))
+
+
+# ---------------- DATA ----------------
+def load_nr_responses(name):
+    Sensitivities = np.load(os.path.join(summary_folder, 'Sensitivities_%s.npy' % name),
+                            allow_pickle=True)
+    if NR_ONLY_RESPONSIVE:
+        Sensitivities = [dict(S, Responses=S['Responses'][S['significant_pos'].any(axis=1)])
+                         for S in Sensitivities]
+    contrast = np.asarray(Sensitivities[0]['contrast'])
+    subjects = np.array([S['subject'] for S in Sensitivities])
+
+    if NR_AVERAGE_BY == 'sessions':
+        R = [S['Responses'].mean(axis=0) for S in Sensitivities if len(S['Responses'])]
+    elif NR_AVERAGE_BY == 'subjects':
+        R = [np.concatenate([S['Responses'] for S, s in zip(Sensitivities, subjects)
+                             if s == subj]).mean(axis=0)
+             for subj in np.unique(subjects)]
+    else:  # ROIs
+        R = list(np.concatenate([S['Responses'] for S in Sensitivities]))
+    return contrast, np.array(R)
+
+
+NR_RESULTS = {}
+for d in NR_DATASETS:
+    contrast, R = load_nr_responses(d['name'])
+    fits = [fit_naka_rushton(contrast, r) for r in R]
+    good = [f for f in fits if f is not None and f['R2'] >= MIN_R2 and not f['at_bound']]
+    NR_RESULTS[d['name']] = dict(contrast=contrast, responses=R, fits=fits, good=good,
+                                 mean_fit=fit_naka_rushton(contrast, R.mean(axis=0)),
+                                 color=d['color'])
+    n_bound = sum(f is not None and f['at_bound'] for f in fits)
+    print(f"{d['name']}: {len(good)}/{len(fits)} {NR_AVERAGE_BY} kept "
+          f"(R2 >= {MIN_R2}, {n_bound} excluded for C50/n at bound)")
+
+
+# contrast axis of the curve plots (real contrast values as tick labels in both cases)
+#   'linear' : the tested contrasts are evenly spaced (0.05 -> 1.00, steps of ~0.135),
+#              so each one gets its own, evenly spaced tick
+#   'log'    : the classical way to show Naka-Rushton curves: the fit becomes a symmetric
+#              S-shape centred on C50. Matplotlib would label it 10^-1, 10^0, so we
+#              replace those with plain numbers. NB: high contrasts get squeezed on the right.
+#   (only the display changes: AUC is always computed over log10(contrast))
+def set_contrast_axis(ax, contrast, scale=None):
+    scale = scale or globals().get('NR_XSCALE', 'linear')
+    contrast = np.asarray(contrast)
+    if scale == 'log':
+        ax.set_xscale('log')
+        ax.minorticks_off()
+        ticks = [t for t in [0.05, 0.1, 0.2, 0.5, 1.] if contrast.min() <= t <= contrast.max()]
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f'{t:g}' for t in ticks], fontsize=7)
+    else:
+        ax.set_xticks(contrast)
+        ax.set_xticklabels([f'{c:.2f}' for c in contrast], rotation=45, fontsize=7)
+
+
+# ---------------- FIGURE 1: curves + fits ----------------
+fig1, ax = plt.subplots(figsize=(4.5, 3.5))
+c_fine = np.logspace(np.log10(0.05), 0, 200)
+for name, res in NR_RESULTS.items():
+    m, s = res['responses'].mean(axis=0), sem(res['responses'], axis=0)
+    ax.errorbar(res['contrast'], m, yerr=s, fmt='o', color=res['color'], ms=4, capsize=2)
+    mf = res['mean_fit']
+    if mf is not None:
+        ax.plot(c_fine, naka_rushton(c_fine, mf['R0'], mf['Rmax'], mf['C50'], mf['n']),
+                color=res['color'],
+                label=f"{name.replace('Deconvolved_', '').replace('_angle-0.0', '')}"
+                      f"  C50={mf['C50']:.2f}{' (at bound!)' if mf['at_bound'] else ''},"
+                      f" Rmax={mf['Rmax']:.3f}, R²={mf['R2']:.2f}")
+set_contrast_axis(ax, contrast)
+ax.set_xlabel('contrast')
+ax.set_ylabel('$\\delta$ response')
+ax.set_title('Naka-Rushton fit (on group mean)')
+ax.legend(fontsize=6, frameon=False, loc='upper left', bbox_to_anchor=(1.02, 1.))
+
+
+# ---------------- significance stars ----------------
+def stars(p):
+    return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
+
+def add_significance(ax, pairs):
+    """ pairs: list of (x1, x2, p) -> bracket + stars above the data, for p<0.05 only """
+    pairs = [(x1, x2, p) for x1, x2, p in pairs if p < 0.05]
+    if not pairs:
+        return
+    y0, y1 = ax.get_ylim()
+    step = 0.08 * (y1 - y0)
+    for k, (x1, x2, p) in enumerate(sorted(pairs, key=lambda q: abs(q[1] - q[0]))):
+        y = y1 + k * step
+        ax.plot([x1, x1, x2, x2], [y - 0.3 * step, y, y, y - 0.3 * step], color='k', lw=0.8)
+        ax.text((x1 + x2) / 2, y - 0.25 * step, stars(p), ha='center', va='bottom',
+                fontsize=12, fontweight='bold')
+    ax.set_ylim(y0, y1 + (len(pairs) + 0.5) * step)
+
+
+# ---------------- FIGURE 2: parameters per unit ----------------
+PARAMS = ['R0', 'Rmax', 'C50', 'n', 'AUC', 'threshold', 'dynamic_range']
+fig2, AX = plt.subplots(1, len(PARAMS), figsize=(2. * len(PARAMS), 3.))
+names = list(NR_RESULTS.keys())
+for ax, p in zip(AX, PARAMS):
+    for i, name in enumerate(names):
+        vals = np.array([f[p] for f in NR_RESULTS[name]['good']])
+        if len(vals) == 0:
+            continue
+        col = NR_RESULTS[name]['color']
+        ax.bar(i, vals.mean(), yerr=sem(vals) if len(vals) > 1 else 0,
+               color=col, alpha=0.4, capsize=2)
+        ax.scatter(i + np.random.uniform(-0.15, 0.15, len(vals)), vals, s=8, color=col)
+    ax.set_title(p)
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels([n_.split('_')[-3] for n_ in names], rotation=60, fontsize=7)
+fig2.tight_layout()
+
+
+# ---------------- STATISTICS ----------------
+# contrast gain  -> C50 changes ; response gain -> Rmax changes
+print(f"\n=== Naka-Rushton parameters (mean ± sem over {NR_AVERAGE_BY}, good fits only) ===")
+for name in names:
+    good = NR_RESULTS[name]['good']
+    if not good:
+        print(f"{name}: no good fit"); continue
+    print(f"\n{name}  (n={len(good)})")
+    for p in PARAMS:
+        v = np.array([f[p] for f in good])
+        print(f"   {p:14s} {v.mean():8.3f} ± {sem(v) if len(v) > 1 else 0:.3f}")
+    print(f"   C50 inside tested range: {sum(f['C50_in_range'] for f in good)}/{len(good)}")
+
+for ax, p in zip(AX, PARAMS):
+    groups = [[f[p] for f in NR_RESULTS[n_]['good']] for n_ in names]
+    pairs = []
+    groups_ok = [g for g in groups if len(g) > 1]
+    if len(groups_ok) > 2:
+        print(f"\n{p}: Kruskal-Wallis p = {kruskal(*groups_ok).pvalue:.4f}")
+    for ((i1, n1), g1), ((i2, n2), g2) in itertools.combinations(zip(enumerate(names), groups), 2):
+        if len(g1) > 1 and len(g2) > 1:
+            pval = mannwhitneyu(g1, g2).pvalue
+            print(f"   {p}: {n1.split('_')[-3]} vs {n2.split('_')[-3]}  "
+                  f"Mann-Whitney p = {pval:.4f}  {stars(pval)}")
+            pairs.append((i1, i2, pval))
+    add_significance(ax, pairs)
+
+if NR_SAVE:
+    os.makedirs(NR_OUTPUT_DIR, exist_ok=True)
+    fig1.savefig(os.path.join(NR_OUTPUT_DIR, 'NakaRushton_curves.svg'), bbox_inches='tight')
+    fig2.savefig(os.path.join(NR_OUTPUT_DIR, 'NakaRushton_params.svg'), bbox_inches='tight')
+
+plt.show()
+
+# %%
+
+#######################################################################################
+### NAKA-RUSHTON: GROUP-LEVEL FIT WITH BOOTSTRAP CONFIDENCE INTERVALS ###
+#######################################################################################
+#
+#   Per-unit fits are often unconstrained (curves not saturating by contrast 1).
+#   More robust: fit the GROUP MEAN curve, and get its uncertainty by resampling
+#   units (sessions / subjects / ROIs) with replacement, re-averaging, re-fitting.
+#
+#   -> 95% CI for each parameter of each group
+#   -> group comparisons: bootstrap distribution of the difference (B - A);
+#      two-sided p = 2 * min(P(diff<=0), P(diff>=0))
+#
+#   Requires the previous cell (NR_RESULTS, fit_naka_rushton, naka_rushton).
+#######################################################################################
+
+N_BOOT = 1000
+CI = 95
+BOOT_SEED = 0
+
+# contrast axis of the curve plots (real contrast values as tick labels in both cases)
+#   'linear' : the tested contrasts are evenly spaced (0.05 -> 1.00, steps of ~0.135),
+#              so each one gets its own, evenly spaced tick
+#   'log'    : the classical way to show Naka-Rushton curves: the fit becomes a symmetric
+#              S-shape centred on C50. Matplotlib would label it 10^-1, 10^0, so we
+#              replace those with plain numbers. NB: high contrasts get squeezed on the right.
+#   (only the display changes: AUC is always computed over log10(contrast))
+def set_contrast_axis(ax, contrast, scale=None):
+    scale = scale or globals().get('NR_XSCALE', 'linear')
+    contrast = np.asarray(contrast)
+    if scale == 'log':
+        ax.set_xscale('log')
+        ax.minorticks_off()
+        ticks = [t for t in [0.05, 0.1, 0.2, 0.5, 1.] if contrast.min() <= t <= contrast.max()]
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([f'{t:g}' for t in ticks], fontsize=7)
+    else:
+        ax.set_xticks(contrast)
+        ax.set_xticklabels([f'{c:.2f}' for c in contrast], rotation=45, fontsize=7)
+BOOT_PARAMS = ['R0', 'Rmax', 'C50', 'n', 'AUC', 'threshold', 'dynamic_range']
+
+rng = np.random.default_rng(BOOT_SEED)
+
+# significance stars (also defined in the previous cell, repeated here so this
+# cell runs even if the previous one was executed before they were added)
+def stars(p):
+    return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ''
+
+def add_significance(ax, pairs):
+    """ pairs: list of (x1, x2, p) -> bracket + stars above the data, for p<0.05 only """
+    pairs = [(x1, x2, p) for x1, x2, p in pairs if p < 0.05]
+    if not pairs:
+        return
+    y0, y1 = ax.get_ylim()
+    step = 0.08 * (y1 - y0)
+    for k, (x1, x2, p) in enumerate(sorted(pairs, key=lambda q: abs(q[1] - q[0]))):
+        y = y1 + k * step
+        ax.plot([x1, x1, x2, x2], [y - 0.3 * step, y, y, y - 0.3 * step], color='k', lw=0.8)
+        ax.text((x1 + x2) / 2, y - 0.25 * step, stars(p), ha='center', va='bottom',
+                fontsize=12, fontweight='bold')
+    ax.set_ylim(y0, y1 + (len(pairs) + 0.5) * step)
+
+for name, res in NR_RESULTS.items():
+    R = res['responses']
+    boot = []
+    for _ in range(N_BOOT):
+        f = fit_naka_rushton(res['contrast'], R[rng.integers(0, len(R), len(R))].mean(axis=0))
+        if f is not None:
+            boot.append(f)
+    res['boot'] = {p: np.array([f[p] for f in boot]) for p in BOOT_PARAMS}
+    res['boot_at_bound'] = np.mean([f['at_bound'] for f in boot])
+
+
+# ---------------- PRINT: estimate [CI] per group ----------------
+lo, hi = (100 - CI) / 2, 100 - (100 - CI) / 2
+print(f"\n=== Group-mean Naka-Rushton fit, {N_BOOT} bootstraps over {NR_AVERAGE_BY}, {CI}% CI ===")
+for name, res in NR_RESULTS.items():
+    mf = res['mean_fit']
+    print(f"\n{name}  (N={len(res['responses'])} {NR_AVERAGE_BY})")
+    for p in BOOT_PARAMS:
+        b = res['boot'][p]
+        print(f"   {p:14s} {mf[p]:8.3f}   [{np.percentile(b, lo):8.3f}, {np.percentile(b, hi):8.3f}]")
+    print(f"   bootstrap fits with C50/n at bound: {100 * res['boot_at_bound']:.0f}%"
+          + ("   <-- C50/n poorly constrained, interpret with care" if res['boot_at_bound'] > 0.2 else ""))
+
+
+# ---------------- PRINT: pairwise comparisons ----------------
+print(f"\n=== Pairwise differences (B - A), bootstrap {CI}% CI and p ===")
+BOOT_PAIRS = {p: [] for p in BOOT_PARAMS}
+for p in BOOT_PARAMS:
+    print(f"\n{p}")
+    for (i1, n1), (i2, n2) in itertools.combinations(enumerate(names), 2):
+        diff = NR_RESULTS[n2]['boot'][p] - NR_RESULTS[n1]['boot'][p]
+        pval = min(1., 2 * min(np.mean(diff <= 0), np.mean(diff >= 0)))
+        print(f"   {n2.split('_')[-3]:8s} - {n1.split('_')[-3]:8s}  "
+              f"{np.median(diff):8.3f}  [{np.percentile(diff, lo):8.3f}, {np.percentile(diff, hi):8.3f}]"
+              f"  p = {pval:.3f}  {stars(pval)}")
+        BOOT_PAIRS[p].append((i1, i2, pval))
+
+
+# ---------------- FIGURE 3: curves with bootstrap bands ----------------
+fig3, AX = plt.subplots(1, 1 + len(BOOT_PARAMS), figsize=(4.5 + 1.8 * len(BOOT_PARAMS), 3.2),
+                        gridspec_kw=dict(width_ratios=[2.5] + [1] * len(BOOT_PARAMS)))
+ax = AX[0]
+for name, res in NR_RESULTS.items():
+    col, b = res['color'], res['boot']
+    curves = np.array([naka_rushton(c_fine, *(b[k][i] for k in ['R0', 'Rmax', 'C50', 'n']))
+                       for i in range(len(b['C50']))])
+    ax.fill_between(c_fine, np.percentile(curves, lo, axis=0), np.percentile(curves, hi, axis=0),
+                    color=col, alpha=0.25, lw=0)
+    mf = res['mean_fit']
+    ax.plot(c_fine, naka_rushton(c_fine, mf['R0'], mf['Rmax'], mf['C50'], mf['n']), color=col)
+    ax.plot(res['contrast'], res['responses'].mean(axis=0), 'o', color=col, ms=3)
+set_contrast_axis(ax, res['contrast'])
+ax.set_xlabel('contrast')
+ax.set_ylabel('$\\delta$ response')
+ax.set_title(f'group fit ± {CI}% bootstrap CI', fontsize=9)
+
+for ax, p in zip(AX[1:], BOOT_PARAMS):
+    for i, name in enumerate(names):
+        res = NR_RESULTS[name]
+        b = res['boot'][p]
+        ax.errorbar(i, res['mean_fit'][p],
+                    yerr=[[res['mean_fit'][p] - np.percentile(b, lo)],
+                          [np.percentile(b, hi) - res['mean_fit'][p]]],
+                    fmt='o', color=res['color'], capsize=3)
+    ax.set_title(p, fontsize=9)
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels([n_.split('_')[-3] for n_ in names], rotation=60, fontsize=7)
+    ax.set_xlim(-0.5, len(names) - 0.5)
+    add_significance(ax, BOOT_PAIRS[p])
+fig3.tight_layout()
+
+if NR_SAVE:
+    os.makedirs(NR_OUTPUT_DIR, exist_ok=True)
+    fig3.savefig(os.path.join(NR_OUTPUT_DIR, 'NakaRushton_bootstrap.svg'), bbox_inches='tight')
+
+plt.show()
+
 # %%

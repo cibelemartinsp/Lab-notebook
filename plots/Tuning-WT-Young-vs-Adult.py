@@ -3,7 +3,7 @@ import os, sys
 import numpy as np
 
 sys.path += [os.path.join(os.path.expanduser('~'),\
-                    'lab-notebook', 'cibele', 'physion', 'src')]
+                    'code', 'cibele', 'physion', 'src')]
 
 from physion.utils import plot_tools as pt
 pt.set_style('manuscript')

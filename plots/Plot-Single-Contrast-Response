@@ -15,7 +15,7 @@ import numpy as np
 import matplotlib.pylab as plt
 
 # Add physion library path
-sys.path += [os.path.join(os.path.expanduser('~'), 'lab-notebook', 'cibele', 'physion', 'src')]
+sys.path += [os.path.join(os.path.expanduser('~'), 'code', 'cibele', 'physion', 'src')]
 
 from physion.analysis.read_NWB import scan_folder_for_NWBfiles, Data
 from physion.analysis.episodes.build import EpisodeData
@@ -215,7 +215,7 @@ import numpy as np
 import matplotlib.pylab as plt
 
 # Add physion library path
-sys.path += [os.path.join(os.path.expanduser('~'), 'lab-notebook', 'cibele', 'physion', 'src')]
+sys.path += [os.path.join(os.path.expanduser('~'), 'code', 'cibele', 'physion', 'src')]
 
 from physion.analysis.read_NWB import scan_folder_for_NWBfiles, Data
 from physion.analysis.episodes.build import EpisodeData

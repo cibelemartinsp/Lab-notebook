@@ -3,7 +3,7 @@ import os, sys
 import numpy as np
 
 sys.path += [os.path.join(os.path.expanduser('~'),\
-                          'lab-notebook', 'cibele', 'physion', 'src')]
+                          'code', 'cibele', 'physion', 'src')]
 from physion.analysis.read_NWB\
                 import scan_folder_for_NWBfiles, Data
 from physion.analysis.episodes.build import EpisodeData
