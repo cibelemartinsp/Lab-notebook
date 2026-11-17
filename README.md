@@ -6,7 +6,7 @@ Analysis and figure scripts for two-photon calcium imaging of V1 interneurons (S
 
 | Folder / file | Content |
 |---|---|
-| `physion/` | Submodule: [yzerlaut/physion](https://github.com/yzerlaut/physion) (data reading, analysis and plotting library) |
+| `physion/` | Submodule: [cibelemartinsp/physion](https://github.com/cibelemartinsp/physion), fork of [yzerlaut/physion](https://github.com/yzerlaut/physion) (data reading, analysis and plotting library) |
 | `utils/plot_tools/` | Submodule: [yzerlaut/plot_tools](https://github.com/yzerlaut/plot_tools) |
 | `analysis/` | Scripts that read the NWB files and build the summary `.npy` files |
 | `plots/` | Scripts that read the summary `.npy` files (or the NWB files) and make the figures |
@@ -18,6 +18,89 @@ Clone with submodules:
 ```
 git clone --recurse-submodules https://github.com/cibelemartinsp/Lab-notebook.git
 ```
+
+If the repo was cloned without them: `git submodule update --init --recursive`.
+
+## Python environment (uv, Python 3.14)
+
+The environment is managed with [uv](https://docs.astral.sh/uv/). It lives in `.venv/` at the root of this repo and contains `physion` (installed in editable mode from the `physion/` submodule, so changes to its source are used straight away) and `suite2p`.
+
+**1. Install uv**
+
+Windows (PowerShell, no admin rights needed):
+
+```
+winget install --id=astral-sh.uv -e
+```
+
+If `winget` is not available, install the standalone `uv.exe` into your user folder:
+
+```
+$dest = "$env:USERPROFILE\.local\bin"; New-Item -ItemType Directory -Force $dest | Out-Null
+Invoke-WebRequest -UseBasicParsing "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\uv.zip"
+Expand-Archive "$env:TEMP\uv.zip" -DestinationPath $dest -Force
+[Environment]::SetEnvironmentVariable('Path', "$dest;" + [Environment]::GetEnvironmentVariable('Path','User'), 'User')
+```
+
+(The official installer, `irm https://astral.sh/uv/install.ps1 | iex`, fails on computers where group policy only allows signed scripts. Check with `Get-ExecutionPolicy -List`: `MachinePolicy` set to `AllSigned` means it is blocked and only an admin can change it.)
+
+Linux / macOS:
+
+```
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Open a new terminal afterwards and check it is found with `uv --version`.
+
+**2. Install Python 3.14 and create the environment** (from the root of this repo)
+
+```
+uv python install 3.14
+uv venv --python 3.14
+```
+
+**3. Activate the environment**
+
+Windows (Command Prompt, `cmd`): `.venv\Scripts\activate.bat`
+Windows (PowerShell): `.venv\Scripts\activate` — this runs an unsigned script and fails if group policy is `AllSigned`. In that case use `cmd`, or skip activating and use `uv pip ... ` / `uv run ...` (uv finds `.venv` by itself). In VS Code, selecting `.venv` as the interpreter is enough.
+Linux / macOS: `source .venv/bin/activate`
+
+Without activation, step 4 works the same (`uv pip` installs into `.venv` automatically), and step 5 becomes `uv run python -c "import physion, suite2p; print('ok')"` and `uv run python -m physion`.
+
+**4. Install physion (editable) and suite2p**
+
+```
+uv pip install -e ./physion
+uv pip install suite2p
+uv pip install ipykernel
+```
+
+- `-e` installs physion in editable mode: the environment points to `physion/src`, so edits to the submodule (or a `git pull` inside it) need no reinstall. Only re-run `uv pip install -e ./physion` if its dependencies in `physion/pyproject.toml` change.
+- Optional physion extras: `uv pip install -e "./physion[ephys]"` (electrophysiology), `"./physion[diffusion]"` (natural-image morphing).
+- `ipykernel` lets VS Code run the `# %%` cells: pick `.venv` as the interpreter / kernel.
+
+**5. Check the install**
+
+```
+python -c "import physion, suite2p; print('ok')"
+python -m physion
+```
+
+The second command opens the physion GUI.
+
+**Open the physion GUI on Windows**
+
+Call the Python of the uv environment directly. This works from any folder, needs no activation and is not blocked by the `AllSigned` policy:
+
+```
+%USERPROFILE%\code\cibele\.venv\Scripts\python.exe -m physion
+```
+
+This is for `cmd`, assuming the repo is in `%USERPROFILE%\code\cibele`; adapt if it is elsewhere. In PowerShell, write it as `& "$env:USERPROFILE\code\cibele\.venv\Scripts\python.exe" -m physion`. From the root of the repo, `.venv\Scripts\python.exe -m physion` is enough.
+
+The same command can be used as the target of a desktop shortcut (right click on the desktop → New → Shortcut) to open physion with a double click.
+
+To run without activating, prefix commands with `uv run`, e.g. `uv run python analysis/Tuning-Dataset.py`.
 
 ## Data flow
 
@@ -110,4 +193,4 @@ Draft of a multipanel figure layout (panels A–E); only the first panel is fill
 ## Notes
 
 - All figures are saved as `.svg` in `~/Desktop/Final-Figures-PhD/` (folder created if missing), except where noted.
-- The scripts find `physion` in different ways: `~/lab-notebook/cibele/physion/src`, `../physion/src` (run from `plots/`), or `~/DATA/physion/src`. Check the `sys.path` line at the top of each script matches where this repo is on your machine.
+- The scripts find `physion` in different ways: `~/lab-notebook/cibele/physion/src`, `../physion/src` (run from `plots/`), or `~/DATA/physion/src`. Check the `sys.path` line at the top of each script matches where this repo is on your machine. With the uv environment above, physion is already installed (editable), so these lines are not needed.
