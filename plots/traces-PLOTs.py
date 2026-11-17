@@ -732,4 +732,376 @@ if groups:
 else:
     print("No valid groups to plot")
 
+
+
+
+
+
+
+
+
+
+
+#%%
+######################################################################
+# REST vs RUN (1/3): CONFIG + HELPERS -> run this cell first
+# trial-averaged dF/F per stimulus, rest and run traces overlaid
+# - episodes classified by the mean running speed during the stimulus
+# - NWBs taken from the dataset folder (same scheme as the cells above)
+# - then: cell 2/3 = one ROI example, cell 3/3 = all sessions
+# self-contained: does not need the cells above
+######################################################################
+
+import os
+import sys
+import glob
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
+
+sys.path.append('../physion/src')
+from physion.analysis.read_NWB import Data
+from physion.analysis.episodes.build import EpisodeData
+
+plt.rcParams['svg.fonttype'] = 'none'
+
+# ------------------------------------------------------------
+# CONFIG
+# ------------------------------------------------------------
+
+#DATASET_NAME = "PYR-SynGCaMP_WT_Adult_V1"
+#DATASET_NAME = "PV-cells_WT_Adult_V1"
+DATASET_NAME = "SST-cells_WT_Adult_V1"
+
+BASE_PATH = os.path.expanduser('~/CURATED/Cibele/')
+NWB_FOLDER = os.path.join(BASE_PATH, DATASET_NAME, 'NWBs')
+
+TARGET_PROTOCOL = "ff-gratings-8orientation-2contrasts-15repeats"
+CONTRASTS = None             # None = all contrasts of the protocol (one panel per contrast x angle)
+
+SESSIONS = []                # e.g. ["2025_10_29-14-39-31"]; empty = all sessions of the folder
+ROIS = None                  # None = all ROIs of the session, or a list of ROI indices
+
+# figure modes:
+#  'best-roi' : single ROI with the largest pref-orth response (like a single-cell example), absolute angles
+#  'aligned'  : mean over ROIs after aligning each ROI to its preferred orientation (center panel = preferred)
+#  'mean'     : plain mean over ROIs, absolute angles (tuning washes out: ROIs prefer different angles)
+BEST_ROI_RANK = 0            # 'best-roi' mode: 0 = most selective ROI, 1 = second, ...
+
+RUN_SPEED_THRESHOLD = 0.1    # cm/s, mean speed during the stimulus (0.1 = physion's behavior default)
+MIN_EPISODES = 2             # min episodes per state and angle to draw a trace
+BASELINE_SUBTRACT = False    # True = subtract the pre-stimulus mean of each episode
+
+REST_COLOR = 'k'
+RUN_COLOR = 'tab:orange'
+STIM_COLOR = '#f2e4ea'       # pink band during the stimulus
+SCALE = 0.5                  # dF/F of the vertical scale bar
+WITH_GRAND_AVERAGE = True    # extra figure: mean of the session means
+
+OUT_DIR = os.path.join(os.path.expanduser('~'), 'Desktop', 'Final-Figures-PhD', 'REST-vs-RUN')
+
+if DATASET_NAME[:4] == 'PYR-':
+    roi_to_neuropil_factor = 0.   # pyramidal cells (see analysis/Preprocessing_Settings.py)
+else:
+    roi_to_neuropil_factor = 1.15 # interneurons
+
+dFoF_parameters = dict(
+    roi_to_neuropil_fluo_inclusion_factor=roi_to_neuropil_factor,
+    neuropil_correction_factor=0.7,
+    method_for_F0='sliding_percentile',
+    percentile=5.,
+    sliding_window=5*60,
+)
+
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+
+def find_session_files(folder, sessions=SESSIONS):
+    files = sorted(glob.glob(os.path.join(folder, '*.nwb')))
+    if sessions:
+        names = [s.replace('.nwb', '') for s in sessions]
+        files = [f for f in files if os.path.basename(f).replace('.nwb', '') in names]
+    out = []
+    for f in files:
+        try:
+            data = Data(f, metadata_only=True, verbose=False)
+            if any(TARGET_PROTOCOL in p for p in data.protocols):
+                out.append(f)
+        except Exception as e:
+            print(f"  !! {os.path.basename(f)}: {e!r}")
+    print(f"{len(out)} sessions with protocol '{TARGET_PROTOCOL}' in {folder}")
+    return out
+
+
+def episode_speeds(data, Episodes):
+    """Mean running speed of each episode during the stimulus window."""
+    data.build_running()
+    speeds = np.zeros(len(Episodes.time_start_realigned))
+    for i, (t0, d) in enumerate(zip(Episodes.time_start_realigned, Episodes.time_duration)):
+        cond = (data.t_running >= t0) & (data.t_running < t0+d)
+        speeds[i] = data.running[cond].mean() if np.any(cond) else np.nan
+    return speeds
+
+
+def orientation_tuning(Episodes, dff, angles):
+    """
+    evoked response (stim mean - prestim mean) per ROI and angle, all episodes
+    at the highest contrast -> preferred angle index, OSI and selectivity score of each ROI
+    score = r_pref - r_orth (dF/F): strong AND selective (OSI alone favors weak noisy ROIs)
+    """
+    stim = (Episodes.t > 0) & (Episodes.t < Episodes.time_duration[0])
+    evoked = dff[:, :, stim].mean(axis=2) - dff[:, :, Episodes.t < 0].mean(axis=2)  # (episodes, rois)
+    c_max = np.isclose(Episodes.contrast, Episodes.contrast.max())
+    R = np.array([evoked[c_max & np.isclose(Episodes.angle, a)].mean(axis=0) for a in angles]).T
+    n = len(angles)
+    pref = R.argmax(axis=1)
+    r_pref = np.clip(R[np.arange(len(R)), pref], 0, None)
+    r_orth = np.clip(R[np.arange(len(R)), (pref+n//2) % n], 0, None)   # +90 deg
+    osi = (r_pref-r_orth)/(r_pref+r_orth+1e-12)
+    osi[r_pref <= 0] = 0                                               # non-responsive ROIs
+    return pref, osi, r_pref-r_orth
+
+
+def load_session(fpath):
+    """Loads one NWB once: episodes dF/F, running state and ROI tuning (reused by all modes)."""
+    data = Data(fpath, verbose=False)
+    if not data.has_running():
+        print(f"  [X] {os.path.basename(fpath)}: no running speed in this NWB")
+        return None
+    data.build_dFoF(verbose=False, **dFoF_parameters)
+    protocol = [p for p in data.protocols if TARGET_PROTOCOL in p][0]
+    Episodes = EpisodeData(data, quantities=['dFoF'], protocol_name=protocol, verbose=False)
+
+    rois = np.arange(data.nROIs) if ROIS is None else np.array(ROIS)
+    dff = Episodes.dFoF[:, rois, :]                          # (episodes, rois, time)
+    if BASELINE_SUBTRACT:
+        dff = dff - dff[:, :, Episodes.t < 0].mean(axis=2, keepdims=True)
+
+    speeds = episode_speeds(data, Episodes)
+    running = speeds > RUN_SPEED_THRESHOLD
+    angles = np.unique(Episodes.angle)
+    pref, osi, score = orientation_tuning(Episodes, dff, angles)
+    return dict(name=os.path.basename(fpath).replace('.nwb', ''),
+                Episodes=Episodes, dff=dff, rois=rois, running=running,
+                angles=angles, pref=pref, osi=osi, score=score)
+
+
+def session_responses(sess, mode, roi=None):
+    """
+    returns dict(t, conds, rest=[...], run=[...], n_rest, n_run, ...)
+    conds: list of (contrast, angle), contrast first then angle
+           (in 'aligned' mode, angle = orientation relative to the preferred one)
+    rest/run: per condition, array (n_samples, time) or None
+              samples = episodes ('best-roi', 'mean') or ROIs ('aligned')
+    roi: ROI index for 'best-roi' mode (None = best ROI of rank BEST_ROI_RANK)
+    """
+    Episodes, dff, rois, running = sess['Episodes'], sess['dff'], sess['rois'], sess['running']
+    angles, pref, osi = sess['angles'], sess['pref'], sess['osi']
+    n = len(angles)
+    contrasts = np.unique(Episodes.contrast) if CONTRASTS is None else np.array(CONTRASTS)
+
+    out = dict(name=sess['name'], mode=mode, t=Episodes.t, nROIs=len(rois),
+               duration=float(Episodes.time_duration[0]),
+               rest=[], run=[], n_rest=int(np.sum(~running)), n_run=int(np.sum(running)))
+
+    if mode == 'aligned':
+        # relative orientations, preferred one in the center panel
+        shifts = np.arange(n) - n//2
+        out['conds'] = [(c, s*(angles[1]-angles[0])) for c in contrasts for s in shifts]
+        for c in contrasts:
+            for s in shifts:
+                for state, s_cond in [('rest', ~running), ('run', running)]:
+                    traces = []
+                    for j in range(len(rois)):
+                        cond = s_cond & np.isclose(Episodes.contrast, c) & \
+                                np.isclose(Episodes.angle, angles[(pref[j]+s) % n])
+                        if np.sum(cond) >= MIN_EPISODES:
+                            traces.append(dff[cond, j, :].mean(axis=0))
+                    out[state].append(np.array(traces) if traces else None)
+        out['label'] = f"{len(rois)} ROIs aligned to preferred orientation"
+    else:
+        if mode == 'best-roi':
+            if roi is None:
+                j = np.argsort(sess['score'])[::-1][BEST_ROI_RANK]
+            else:
+                j = int(np.where(rois == roi)[0][0])
+            resp = dff[:, j, :]
+            out['label'] = f"ROI {rois[j]}: OSI {osi[j]:.2f}"
+        else:
+            resp = dff.mean(axis=1)
+            out['label'] = f"mean of {len(rois)} ROIs"
+        out['conds'] = [(c, a) for c in contrasts for a in angles]
+        for c, a in out['conds']:
+            cond = np.isclose(Episodes.contrast, c) & np.isclose(Episodes.angle, a)
+            out['rest'].append(resp[cond & ~running] if np.sum(cond & ~running) >= MIN_EPISODES else None)
+            out['run'].append(resp[cond & running] if np.sum(cond & running) >= MIN_EPISODES else None)
+
+    print(f"  [v] {out['name']}: {out['label']} | rest n={out['n_rest']} | run n={out['n_run']} episodes")
+    return out
+
+
+def best_rois_table(sess, n=10):
+    """Prints the ROIs ranked by selectivity score (to choose an example ROI)."""
+    print(f"\n{sess['name']}: best ROIs (score = pref-orth dF/F, at highest contrast)")
+    for j in np.argsort(sess['score'])[::-1][:n]:
+        print(f"  ROI {sess['rois'][j]:4d} | pref {sess['angles'][sess['pref'][j]]:6.1f} deg"
+              f" | OSI {sess['osi'][j]:.2f} | score {sess['score'][j]:.3f}")
+
+
+def draw_grating_icon(ax, angle, contrast=1.0):
+    """Small static-grating square, stripes darker for higher contrast."""
+    ax.set_xlim(-1, 1); ax.set_ylim(-1, 1); ax.set_aspect('equal'); ax.axis('off')
+    box = Rectangle((-1, -1), 2, 2, fc='white', ec='0.5', lw=0.3)
+    ax.add_patch(box)
+    th = np.deg2rad(angle)
+    dx, dy = np.cos(th), np.sin(th)
+    gray = str(float(np.clip(1-contrast, 0, 0.9)))
+    for o in np.linspace(-1.4, 1.4, 8):          # stripes perpendicular to the angle direction
+        line, = ax.plot([o*dx-1.5*dy, o*dx+1.5*dy], [o*dy+1.5*dx, o*dy-1.5*dx],
+                        color=gray, lw=0.6, solid_capstyle='butt')
+        line.set_clip_path(box)
+
+
+def mean_sem(x):
+    return x.mean(axis=0), x.std(axis=0)/np.sqrt(len(x))
+
+
+def plot_rest_vs_run(resp, title, savepath=None):
+    t, conds = resp['t'], resp['conds']
+    n = len(conds)
+    fig, AX = plt.subplots(2, n+1, figsize=(0.8*(n+1), 2.),
+                           gridspec_kw=dict(height_ratios=[4, 1], wspace=0.05, hspace=0.05))
+
+    # common y range across panels
+    lo, hi = np.inf, -np.inf
+    for state in ['rest', 'run']:
+        for x in resp[state]:
+            if x is not None:
+                m, s = mean_sem(x)
+                lo, hi = min(lo, (m-s).min()), max(hi, (m+s).max())
+    if not np.isfinite(lo):
+        print(f"  [X] {title}: not enough episodes to plot")
+        plt.close(fig)
+        return None
+    pad = 0.05*(hi-lo)
+    ylim = (lo-pad, hi+pad)
+
+    for i, (c, a) in enumerate(conds):
+        ax = AX[0, i]
+        ax.axvspan(0, resp['duration'], color=STIM_COLOR, lw=0)
+        for state, color in [('rest', REST_COLOR), ('run', RUN_COLOR)]:
+            x = resp[state][i]
+            if x is None:
+                continue
+            m, s = mean_sem(x)
+            ax.fill_between(t, m-s, m+s, color=color, alpha=0.3, lw=0)
+            ax.plot(t, m, color=color, lw=0.8)
+        ax.set_ylim(ylim); ax.set_xlim(t[0], t[-1]); ax.axis('off')
+        draw_grating_icon(AX[1, i], a, c)
+        if i == 0 or c != conds[i-1][0]:
+            AX[1, i].set_title('c=%g' % c, fontsize=6, loc='left', pad=1)
+        if resp.get('mode') == 'aligned':
+            AX[1, i].text(0, -1.3, '%+g' % a if a else 'pref.', ha='center', va='top', fontsize=5)
+
+    # scale bars in the last column
+    ax = AX[0, n]
+    ax.set_ylim(ylim); ax.set_xlim(t[0], t[-1]); ax.axis('off')
+    y0 = ylim[0]+0.1*(ylim[1]-ylim[0])
+    ax.plot([t[0]]*2, [y0, y0+SCALE], 'k-', lw=1)
+    ax.plot([t[0], t[0]+resp['duration']], [y0]*2, 'k-', lw=1)
+    ax.text(t[0]+0.05*(t[-1]-t[0]), y0+SCALE/2, '%s ΔF/F' % SCALE,
+            rotation=90, ha='left', va='center', fontsize=7)
+    ax.text(t[0]+resp['duration']/2, y0, '%gs' % resp['duration'], ha='center', va='top', fontsize=7)
+    AX[1, n].axis('off')
+
+    AX[0, 0].set_title(title, loc='left', fontsize=8)
+    AX[0, n].plot([], [], color=REST_COLOR, label='rest (n=%i)' % resp['n_rest'])
+    AX[0, n].plot([], [], color=RUN_COLOR, label='run (n=%i)' % resp['n_run'])
+    AX[0, n].legend(frameon=False, fontsize=6, loc='upper left', bbox_to_anchor=(0, 1.15))
+
+    if savepath:
+        fig.savefig(savepath, format='svg', dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"  saved: {savepath}")
+    return fig
+
+
+def grand_average(responses):
+    """Mean across sessions of the session means (sessions treated as samples)."""
+    ok = [r for r in responses if r is not None]
+    conds = ok[0]['conds']
+    out = dict(mode=ok[0]['mode'], t=ok[0]['t'], conds=conds, duration=ok[0]['duration'],
+               rest=[], run=[], n_rest=0, n_run=0)
+    for state in ['rest', 'run']:
+        for i in range(len(conds)):
+            means = [r[state][i].mean(axis=0) for r in ok
+                     if np.allclose(r['conds'], conds) and r[state][i] is not None]
+            out[state].append(np.array(means) if len(means) >= MIN_EPISODES else None)
+        out['n_%s' % state] = max([0]+[len(x) for x in out[state] if x is not None])
+    return out
+
+os.makedirs(OUT_DIR, exist_ok=True)
+
+#%%
+######################################################################
+# REST vs RUN (2/3): ONE ROI EXAMPLE (single session, single ROI)
+# - EXAMPLE_ROI = None -> best ROI of the session; the ranking is printed to choose another one
+######################################################################
+
+EXAMPLE_SESSION = "2024_08_27-11-45-06"   # NWB filename (without .nwb) inside NWB_FOLDER
+EXAMPLE_ROI = None                        # ROI index, or None = best ROI
+
+example_file = os.path.join(NWB_FOLDER, EXAMPLE_SESSION + '.nwb')
+example = load_session(example_file) if os.path.exists(example_file) else None
+if not os.path.exists(example_file):
+    print(f"[ERROR] {example_file} not found (check DATASET_NAME in cell 1/3)")
+if example is not None:
+    best_rois_table(example)
+    resp = session_responses(example, 'best-roi', roi=EXAMPLE_ROI)
+    out = os.path.join(OUT_DIR, f"REST-vs-RUN_{DATASET_NAME}_example_{resp['name']}_{resp['label'].split(':')[0].replace(' ', '')}.svg")
+    plot_rest_vs_run(resp, f"{resp['name']} - {resp['label']}", savepath=out)
+    plt.show()
+
+#%%
+######################################################################
+# REST vs RUN (3/3): ALL SESSIONS OF THE FOLDER
+# - for each session: one figure per mode in MODES
+# - plus the grand average (mean of session means) per mode
+######################################################################
+
+MODES = ['best-roi', 'aligned']   # add 'mean' for the plain mean over ROIs
+
+print(f"\nREST vs RUN | {DATASET_NAME} | {TARGET_PROTOCOL} | "
+      f"run threshold={RUN_SPEED_THRESHOLD} cm/s | modes={MODES}")
+
+responses = {mode: [] for mode in MODES}
+for fpath in find_session_files(NWB_FOLDER):
+    try:
+        sess = load_session(fpath)
+        if sess is None:
+            continue
+        for mode in MODES:
+            resp = session_responses(sess, mode)
+            responses[mode].append(resp)
+            out = os.path.join(OUT_DIR, f"REST-vs-RUN_{DATASET_NAME}_{mode}_{resp['name']}.svg")
+            plot_rest_vs_run(resp, f"{resp['name']} - {resp['label']}", savepath=out)
+            plt.close('all')
+    except Exception as e:
+        print(f"  !! {os.path.basename(fpath)}: {e!r}")
+
+if WITH_GRAND_AVERAGE:
+    for mode in MODES:
+        if not responses[mode]:
+            continue
+        ga = grand_average(responses[mode])
+        out = os.path.join(OUT_DIR, f"REST-vs-RUN_{DATASET_NAME}_{mode}_grand-average.svg")
+        fig = plot_rest_vs_run(ga, f"{DATASET_NAME} - {mode} - mean of sessions", savepath=out)
+        if fig is not None:
+            # in the grand average, n = number of sessions
+            for txt in fig.axes[len(ga['conds'])].get_legend().get_texts():
+                txt.set_text(txt.get_text().replace('n=', 'sessions='))
+            fig.savefig(out, format='svg', dpi=300, bbox_inches='tight', facecolor='white')
+
+plt.show()
+
 #%%

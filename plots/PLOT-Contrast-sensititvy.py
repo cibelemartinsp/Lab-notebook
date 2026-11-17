@@ -779,10 +779,10 @@ from scipy.stats import mannwhitneyu, kruskal, sem
 
 # ---------------- SETTINGS ----------------
 NR_DATASETS = [
-    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_P15-P19_V1_angle-0.0", "color": "#dbc0f2ff"},
-    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_P20-P23_V1_angle-0.0", "color": "#b38fd6ff"},
-    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_P24-P27_V1_angle-0.0", "color": "#9740d2ff"},
-    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_Adult_V1_angle-0.0",   "color": "#5d1490ff"},
+    {"name": "Deconvolved_SST-cells_WT_Adult_V1_angle-0.0", "color": "#12522eff"},
+    {"name": "Deconvolved_PV-cells_WT_Adult_V1_angle-0.0", "color": "#b30a7bff"},
+    {"name": "Deconvolved_PYR-SynGCaMP_WT_Adult_V1_angle-0.0", "color": "#005d8aff"},
+    #{"name": "Deconvolved_SST-cells_cond-GluN1-KO_Adult_V1_angle-0.0",   "color": "#5d1490ff"},
 ]
 NR_AVERAGE_BY = 'sessions'     # 'sessions', 'subjects' or 'ROIs'  (one fit per unit)
 NR_ONLY_RESPONSIVE = False     # True -> keep only ROIs significant (positive) at >=1 contrast
@@ -1122,6 +1122,205 @@ fig3.tight_layout()
 if NR_SAVE:
     os.makedirs(NR_OUTPUT_DIR, exist_ok=True)
     fig3.savefig(os.path.join(NR_OUTPUT_DIR, 'NakaRushton_bootstrap.svg'), bbox_inches='tight')
+
+plt.show()
+
+
+# %%
+
+#######################################################################################
+### PER-ROI NAKA-RUSHTON: HOW MANY CELLS SATURATE BEFORE FULL CONTRAST? ###
+#######################################################################################
+#
+#   Same analysis as Fig. 4 of Yoshida, Chen, Geisler & Seidemann (bioRxiv 2026),
+#   "Wide dynamic range of contrast-encoding in neural responses in macaque V1":
+#
+#   1) one Naka-Rushton fit per ROI:  R = Rmax * c^n / (c^n + C50^n) + R0
+#   2) C90 = contrast where R reaches R0 + 90% of Rmax  ->  C90 = C50 * 9^(1/n)
+#   3) C90 <= 1  : the ROI saturates before full contrast
+#      C90 >  1  : the ROI keeps rising up to full contrast
+#                  (C90 is then extrapolated beyond the tested range, so we only
+#                   know that it does NOT saturate by contrast 1, not where it would)
+#
+#   Differences with the cell above (and why):
+#   - fits are NOT discarded when C50/n reach a bound: a high C50 is precisely what a
+#     non-saturating cell looks like, so discarding it would bias the count
+#   - bounds as in the paper: n in [0, 3], C50 up to 9x the max tested contrast
+#     (paper: up to 900% for stimuli up to 900%; we keep the same "9x" ratio)
+#   - inclusion as in the paper: R2 > ROI_MIN_R2 and a real visual response.
+#     The paper uses Rmax >= 5 spikes/s and Rmax/SR >= 3, which have no equivalent
+#     on post-pre deconvolved values, so we use: positive significant response at
+#     >= 1 contrast (significant_pos, from the summary) + Rmax > 0.
+#   - least-squares fit on trial-averaged responses (paper: maximum likelihood on spikes)
+#
+#   ROIs are pooled over sessions (as units are pooled in the paper).
+#######################################################################################
+
+import os, itertools
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from scipy.stats import mannwhitneyu, fisher_exact
+
+# ---------------- SETTINGS ----------------
+ROI_NR_DATASETS = [
+    {"name": "Deconvolved_SST-cells_WT_Adult_V1_angle-0.0",           "color": "#12522eff"},
+    {"name": "Deconvolved_SST-cells_cond-GluN1-KO_Adult_V1_angle-0.0", "color": "#5d1490ff"},
+    {"name": "Deconvolved_PV-cells_WT_Adult_V1_angle-0.0",            "color": "#c0392bff"},
+    {"name": "Deconvolved_PYR-SynGCaMP_WT_Adult_V1_angle-0.0",        "color": "#7f7f7fff"},
+]
+ROI_N_BOUNDS = (0.05, 3.)        # paper: 0 - 3 (0 excluded: flat curve, C90 undefined)
+ROI_C50_BOUNDS = (0.01, 9.)      # paper: 0 - 900% for stimuli up to 900%  -> 9x max contrast
+ROI_MIN_R2 = 0.8                 # paper: R2 > 0.8
+ROI_ONLY_RESPONSIVE = True       # keep ROIs with a positive significant response at >=1 contrast
+ROI_NR_SAVE = False
+ROI_NR_OUTPUT_DIR = os.path.expanduser('~/Desktop/Final-Figures-PhD')
+
+try:
+    summary_folder
+except NameError:
+    summary_folder = os.path.expanduser('~/CURATED/Cibele/summary')
+
+
+# ---------------- FIT ----------------
+def nr_curve(c, R0, Rmax, C50, n):
+    return R0 + Rmax * c**n / (c**n + C50**n)
+
+def fit_roi(contrast, response):
+    span = max(np.ptp(response), 1e-9)
+    p0 = [response.min(), span, np.median(contrast), 1.5]
+    bounds = ([response.min() - span, 0.,         ROI_C50_BOUNDS[0], ROI_N_BOUNDS[0]],
+              [response.max(),        10. * span, ROI_C50_BOUNDS[1], ROI_N_BOUNDS[1]])
+    try:
+        popt, _ = curve_fit(nr_curve, contrast, response, p0=p0, bounds=bounds, maxfev=20000)
+    except (RuntimeError, ValueError):
+        return None
+    R0, Rmax, C50, n = popt
+    ss_tot = np.sum((response - response.mean())**2)
+    R2 = 1. - np.sum((response - nr_curve(contrast, *popt))**2) / ss_tot if ss_tot > 0 else np.nan
+    return dict(R0=R0, Rmax=Rmax, C50=C50, n=n, R2=R2,
+                C90=C50 * 9.**(1. / n))     # R0 + 0.9*Rmax  <=>  (c/C50)^n = 9
+
+
+ROI_NR = {}
+for d in ROI_NR_DATASETS:
+    Sensitivities = np.load(os.path.join(summary_folder, 'Sensitivities_%s.npy' % d['name']),
+                            allow_pickle=True)
+    contrast = np.asarray(Sensitivities[0]['contrast'], float)
+    R = np.concatenate([S['Responses'] for S in Sensitivities])
+    responsive = np.concatenate([S['significant_pos'].any(axis=1) for S in Sensitivities])
+    if ROI_ONLY_RESPONSIVE:
+        R = R[responsive]
+    fits = [fit_roi(contrast, r) for r in R]
+    keep = np.array([f is not None and f['R2'] > ROI_MIN_R2 and f['Rmax'] > 0 for f in fits])
+    P = {k: np.array([f[k] for f, ok in zip(fits, keep) if ok])
+         for k in ['R0', 'Rmax', 'C50', 'n', 'R2', 'C90']}
+    ROI_NR[d['name']] = dict(P, color=d['color'], contrast=contrast,
+                             responses=R[keep], n_total=len(responsive), n_tested=len(R),
+                             saturating=P['C90'] <= contrast.max())
+    print(f"{d['name']}: {keep.sum()}/{len(R)} ROIs kept (R2 > {ROI_MIN_R2})"
+          + (f"  [{len(R)}/{len(responsive)} ROIs responsive]" if ROI_ONLY_RESPONSIVE else ''))
+
+roi_names = list(ROI_NR.keys())
+short = lambda name: name.replace('Deconvolved_', '').replace('_V1_angle-0.0', '')
+
+
+# ---------------- PRINT: % saturating ----------------
+print(f"\n=== Per-ROI Naka-Rushton: C90 <= {contrast.max():g} (saturate) vs > (keep rising) ===")
+for name in roi_names:
+    r = ROI_NR[name]
+    N, ns = len(r['C90']), r['saturating'].sum()
+    if N == 0:
+        print(f"{short(name):35s} no ROI kept"); continue
+    print(f"{short(name):35s} N={N:4d}   saturate: {ns:4d} ({100 * ns / N:4.1f}%)   "
+          f"keep rising: {N - ns:4d} ({100 * (N - ns) / N:4.1f}%)   "
+          f"median C50={np.median(r['C50']):.2f}  n={np.median(r['n']):.2f}  "
+          f"C50 at upper bound: {np.mean(np.isclose(r['C50'], ROI_C50_BOUNDS[1], rtol=1e-3)) * 100:.0f}%")
+
+print("\n=== Group comparisons ===")
+print("   % saturating: Fisher exact test ; C50, n: Mann-Whitney U")
+for n1, n2 in itertools.combinations(roi_names, 2):
+    a, b = ROI_NR[n1], ROI_NR[n2]
+    if len(a['C90']) == 0 or len(b['C90']) == 0:
+        continue
+    table = [[a['saturating'].sum(), (~a['saturating']).sum()],
+             [b['saturating'].sum(), (~b['saturating']).sum()]]
+    p_sat = fisher_exact(table)[1]
+    p_c50 = mannwhitneyu(a['C50'], b['C50']).pvalue
+    p_n = mannwhitneyu(a['n'], b['n']).pvalue
+    print(f"   {short(n1)} vs {short(n2)}:  %sat p={p_sat:.2g}   C50 p={p_c50:.2g}   n p={p_n:.2g}")
+
+
+# ---------------- FIGURE 4-like ----------------
+#   row 1 (paper Fig. 4A): C50 vs n, one dot per ROI (dashed line = max tested contrast)
+#   row 2 (paper Fig. 4B): distribution of C90 (dashed line = max tested contrast)
+#   row 3 (paper Fig. 5C-like): mean normalised curve of saturating vs non-saturating ROIs
+fig4, AX = plt.subplots(3, len(roi_names), figsize=(3. * len(roi_names), 8.3), squeeze=False)
+c_fine = np.linspace(contrast.min(), contrast.max(), 200)
+for j, name in enumerate(roi_names):
+    r = ROI_NR[name]
+    col, cmax = r['color'], r['contrast'].max()
+    sat = r['saturating']
+
+    ax = AX[0, j]
+    ax.scatter(r['n'][~sat], r['C50'][~sat], s=6, color=col, alpha=0.35, lw=0, label='C90 > 1')
+    ax.scatter(r['n'][sat], r['C50'][sat], s=6, color='k', alpha=0.6, lw=0, label='C90 ≤ 1')
+    ax.axhline(cmax, ls='--', color='grey', lw=0.8)
+    ax.set_yscale('log')
+    ax.set_ylim(ROI_C50_BOUNDS[0] * 0.8, ROI_C50_BOUNDS[1] * 1.3)
+    ax.set_xlim(0, ROI_N_BOUNDS[1] + 0.1)
+    ax.set_xlabel('n')
+    ax.set_title(f"{short(name)}\nN={len(sat)} ROIs", fontsize=8)
+    if j == 0:
+        ax.set_ylabel('C50')
+        ax.legend(fontsize=6, frameon=False, markerscale=2)
+
+    ax = AX[1, j]
+    if len(sat):
+        logC90 = np.log10(np.clip(r['C90'], 1e-2, 1e3))
+        ax.hist(logC90, bins=np.linspace(-2, 3, 41), color=col, alpha=0.7)
+        ax.axvline(np.log10(cmax), ls='--', color='grey', lw=0.8)
+        ax.set_title(f"saturate before {cmax:g}: {100 * sat.mean():.0f}%", fontsize=8)
+    ax.set_xticks([-2, -1, 0, 1, 2, 3])
+    ax.set_xticklabels(['0.01', '0.1', '1', '10', '100', '≥1000'], fontsize=7)
+    ax.set_xlabel('C90 (contrast)')
+    if j == 0:
+        ax.set_ylabel('# ROIs')
+
+    ax = AX[2, j]
+    for mask, c_, lab in [(sat, 'k', 'C90 ≤ 1'), (~sat, col, 'C90 > 1')]:
+        if mask.sum() == 0:
+            continue
+        Rn = r['responses'][mask] / np.abs(r['responses'][mask]).max(axis=1, keepdims=True)
+        m, s = Rn.mean(axis=0), Rn.std(axis=0) / np.sqrt(len(Rn))
+        ax.errorbar(r['contrast'], m, yerr=s, fmt='o', ms=3, color=c_, capsize=2,
+                    label=f"{lab} (n={mask.sum()})")
+    ax.set_xlabel('contrast')
+    ax.set_xticks(r['contrast'])
+    ax.set_xticklabels([f'{c:.2f}' for c in r['contrast']], rotation=45, fontsize=6)
+    if j == 0:
+        ax.set_ylabel('normalised response')
+    ax.legend(fontsize=6, frameon=False)
+fig4.tight_layout()
+
+
+# ---------------- FIGURE: % saturating per group ----------------
+fig5, ax = plt.subplots(figsize=(1. + 0.8 * len(roi_names), 3.))
+for i, name in enumerate(roi_names):
+    sat = ROI_NR[name]['saturating']
+    if len(sat):
+        ax.bar(i, 100 * sat.mean(), color=ROI_NR[name]['color'])
+        ax.text(i, 100 * sat.mean() + 1, f"{sat.sum()}/{len(sat)}", ha='center', fontsize=6)
+ax.set_xticks(range(len(roi_names)))
+ax.set_xticklabels([short(n_) for n_ in roi_names], rotation=60, ha='right', fontsize=7)
+ax.set_ylabel('% ROIs saturating\nbefore full contrast (C90 ≤ 1)')
+ax.set_ylim(0, 100)
+fig5.tight_layout()
+
+if ROI_NR_SAVE:
+    os.makedirs(ROI_NR_OUTPUT_DIR, exist_ok=True)
+    fig4.savefig(os.path.join(ROI_NR_OUTPUT_DIR, 'NakaRushton_perROI_C50-n-C90.svg'), bbox_inches='tight')
+    fig5.savefig(os.path.join(ROI_NR_OUTPUT_DIR, 'NakaRushton_perROI_fraction-saturating.svg'), bbox_inches='tight')
 
 plt.show()
 
