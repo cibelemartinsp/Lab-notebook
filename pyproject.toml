@@ -1,0 +1,29 @@
+[project]
+name = "lab-notebook"
+version = "0.1.0"
+description = "Analysis and figure scripts for two-photon calcium imaging of V1 interneurons (SST, PV) and pyramidal cells"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    # data reading, analysis and plotting (installed in editable mode from the submodule, see [tool.uv.sources])
+    "physion",
+    # registration and cell detection, with its GUI and the extra file readers
+    "suite2p[gui,io]",
+    # to run the "# %%" cells in VS Code / Jupyter
+    "ipykernel",
+]
+
+[project.optional-dependencies]
+# electrophysiology: spike sorting, LFP, ephys notebooks of physion
+ephys = ["physion[ephys]"]
+# diffusion-model morphing of natural images (physion/visual_stim/natural_images/diffusion.py)
+diffusion = ["physion[diffusion]"]
+
+[tool.uv]
+# this repo is a set of scripts, not a package to build: uv only installs the dependencies
+package = false
+# recent pyqt5-qt5 releases (needed by physion) have no Windows wheels: 5.15.2 is the last one that does
+constraint-dependencies = ["pyqt5-qt5==5.15.2; sys_platform == 'win32'"]
+
+[tool.uv.sources]
+physion = { path = "physion", editable = true }

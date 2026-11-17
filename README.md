@@ -10,6 +10,7 @@ Analysis and figure scripts for two-photon calcium imaging of V1 interneurons (S
 | `utils/plot_tools/` | Submodule: [yzerlaut/plot_tools](https://github.com/yzerlaut/plot_tools) |
 | `analysis/` | Scripts that read the NWB files and build the summary `.npy` files |
 | `plots/` | Scripts that read the summary `.npy` files (or the NWB files) and make the figures |
+| `pyproject.toml`, `uv.lock`, `.python-version` | Python environment (see below) |
 | `script.sh` | Runs the three dataset analyses (`Contrast-Dataset`, `Tuning-Dataset`, `Temporal-Dynamics`) |
 | `full-analysis-pipeline.sh` | Builds the NWBs, fills the DataTables and makes per-session summary PDFs |
 
@@ -23,7 +24,7 @@ If the repo was cloned without them: `git submodule update --init --recursive`.
 
 ## Python environment (uv, Python 3.14)
 
-The environment is managed with [uv](https://docs.astral.sh/uv/). It lives in `.venv/` at the root of this repo and contains `physion` (installed in editable mode from the `physion/` submodule, so changes to its source are used straight away) and `suite2p`.
+The environment is managed with [uv](https://docs.astral.sh/uv/) from [pyproject.toml](pyproject.toml). It lives in `.venv/` at the root of this repo and contains `physion` (editable, from the `physion/` submodule) and `suite2p`.
 
 **1. Install uv**
 
@@ -52,41 +53,44 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Open a new terminal afterwards and check it is found with `uv --version`.
 
-**2. Install Python 3.14 and create the environment** (from the root of this repo)
+**2. Install everything** (from the root of this repo)
 
 ```
-uv python install 3.14
-uv venv --python 3.14
+uv sync
 ```
 
-**3. Activate the environment**
+This one command reads [pyproject.toml](pyproject.toml) and:
+- downloads Python 3.14 if needed (version set in `.python-version`) and creates `.venv/`,
+- installs `physion` in **editable** mode from the `physion/` submodule: edits to its source, or a `git pull` inside it, are used without reinstalling,
+- installs `suite2p[gui,io]`: suite2p with its GUI (PyQt6, rastermap, …) and its extra file readers,
+- installs `ipykernel`, to run the `# %%` cells in VS Code (pick `.venv` as the interpreter / kernel).
 
-Windows (Command Prompt, `cmd`): `.venv\Scripts\activate.bat`
-Windows (PowerShell): `.venv\Scripts\activate` — this runs an unsigned script and fails if group policy is `AllSigned`. In that case use `cmd`, or skip activating and use `uv pip ... ` / `uv run ...` (uv finds `.venv` by itself). In VS Code, selecting `.venv` as the interpreter is enough.
-Linux / macOS: `source .venv/bin/activate`
+The exact versions are fixed in `uv.lock`, so every computer gets the same environment.
 
-Without activation, step 4 works the same (`uv pip` installs into `.venv` automatically), and step 5 becomes `uv run python -c "import physion, suite2p; print('ok')"` and `uv run python -m physion`.
+Optional physion extras: `uv sync --extra ephys` (electrophysiology), `uv sync --extra diffusion` (natural-image morphing).
 
-**4. Install physion (editable) and suite2p**
-
-```
-uv pip install -e ./physion
-uv pip install suite2p
-uv pip install ipykernel
-```
-
-- `-e` installs physion in editable mode: the environment points to `physion/src`, so edits to the submodule (or a `git pull` inside it) need no reinstall. Only re-run `uv pip install -e ./physion` if its dependencies in `physion/pyproject.toml` change.
-- Optional physion extras: `uv pip install -e "./physion[ephys]"` (electrophysiology), `"./physion[diffusion]"` (natural-image morphing).
-- `ipykernel` lets VS Code run the `# %%` cells: pick `.venv` as the interpreter / kernel.
-
-**5. Check the install**
+**3. Check the install**
 
 ```
-python -c "import physion, suite2p; print('ok')"
-python -m physion
+uv run python -c "import physion, suite2p; print('ok')"
+uv run python -m physion
 ```
 
 The second command opens the physion GUI.
+
+**Update the environment**
+
+- After pulling this repo (or changing `pyproject.toml`, or a dependency of `physion/pyproject.toml`): `uv sync`
+- Upgrade all packages to their latest versions: `uv lock --upgrade`, then `uv sync`
+- Add a package: `uv add <package>` (it is written into `pyproject.toml` and `uv.lock`)
+
+**Activating the environment (optional)**
+
+`uv run ...` uses `.venv` without activating it. To activate it anyway:
+
+Windows (Command Prompt, `cmd`): `.venv\Scripts\activate.bat`
+Windows (PowerShell): `.venv\Scripts\activate` — this runs an unsigned script and fails if group policy is `AllSigned`; use `cmd` or `uv run` instead.
+Linux / macOS: `source .venv/bin/activate`
 
 **Open the physion GUI on Windows**
 
